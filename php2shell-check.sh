@@ -315,8 +315,15 @@ run_single() {
 
   check_php
 
+  DB_OK=0
   if "${WPCMD[@]}" core version >/dev/null 2>&1; then
     note "WordPress $("${WPCMD[@]}" core version 2>/dev/null)"
+    # Checksums only need the files; users/options/cron need a live database.
+    if "${WPCMD[@]}" db query 'SELECT 1' >/dev/null 2>&1; then
+      DB_OK=1
+    else
+      note "Database unreachable from here (wrong host, or a Docker/remote DB). User, database and cron checks will be skipped; run on the server or inside the container for those."
+    fi
     echo
     check_core_files
     check_plugin_files
@@ -331,9 +338,14 @@ run_single() {
   check_prepend_and_mu "$p"
   check_code_patterns "$p"
 
-  if [ ${#WPCMD[@]} -gt 0 ]; then
+  if [ ${#WPCMD[@]} -gt 0 ] && [ "$DB_OK" = 1 ]; then
     check_users
     check_database
+  elif [ ${#WPCMD[@]} -gt 0 ]; then
+    echo "## Users, database and scheduled events"
+    echo
+    review "SKIPPED: database unreachable. Admin accounts, injected options/posts and cron events were not checked."
+    echo
   fi
 
   check_server
