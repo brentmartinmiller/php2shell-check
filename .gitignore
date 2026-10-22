@@ -1,0 +1,3 @@
+# Site lists and reports contain client hostnames; never commit them.
+sites.txt
+php2shell-reports/

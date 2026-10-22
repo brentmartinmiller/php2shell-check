@@ -1,0 +1,13 @@
+# One site per line: a local path, or user@host:path for SSH.
+# Lines starting with # are ignored. Copy this to sites.txt and edit.
+
+# Local sites on this server
+/var/www/example.com
+/var/www/anotherclient.com/public
+
+# Remote sites (keys, ports and jump hosts go in ~/.ssh/config)
+deploy@203.0.113.10:/var/www/html
+client-a:/var/www/html
+
+# Shared hosting: relative paths are relative to the SSH home directory
+u123456@shared-host.example.net:domains/example.com/public_html
