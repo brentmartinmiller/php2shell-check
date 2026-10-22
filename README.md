@@ -170,6 +170,14 @@ was looking, which is plenty of time to backdate a file and trim a log.
 - Analytics and header-script plugins store `<script src=...>` in options.
 - Some obfuscated premium plugins trip the code-pattern check.
 - Updating plugins or core during the window puts files in the "recently changed" list.
+- WordPress 7.x installs on some hosts leave duplicate files in
+  `wp-includes/php-ai-client/` whose names are cut off at a fixed length
+  (no `.php` extension). They show up as "File should not exist", are
+  byte-identical to their full-name twins, and can't be executed by the web
+  server. Compare a few with `md5sum` and delete them if you like.
+- A `wp-cli.phar` or other tooling left in the web root is also reported as
+  an extra file. It isn't an attack, but it shouldn't be web-reachable; move
+  it out of the document root.
 
 **CLI PHP ≠ web PHP.** The version check reads the command-line PHP. PHP-FPM
 or mod_php can be running a different version. Confirm with `phpinfo()` or

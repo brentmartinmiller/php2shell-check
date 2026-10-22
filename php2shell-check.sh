@@ -27,6 +27,10 @@
 
 set -uo pipefail
 
+# A GREP_OPTIONS=--color=always in the caller's environment would put ANSI
+# codes into values this script parses, so neutralise it.
+unset GREP_OPTIONS
+
 SINCE="${SINCE:-2026-10-17}"
 WP="${WP:-wp}"
 OUT="${OUT:-./php2shell-reports}"
@@ -103,13 +107,21 @@ check_php() {
 check_core_files() {
   echo "## WordPress core integrity"
   echo
-  local out rc
+  local out rc extra
   out="$("${WPLOUD[@]}" core verify-checksums 2>&1)"; rc=$?
-  if [ $rc -eq 0 ]; then
-    ok "Core files match wordpress.org checksums."
-  else
-    flag "Core checksum problems (modified, missing, or unexpected files):"
+  if [ $rc -ne 0 ]; then
+    flag "Core checksum problems (modified or missing files):"
     printf '%s\n' "$out" | grep -v '^Error: WordPress installation' | block 80
+  else
+    # WP-CLI reports files that aren't part of core ("File should not exist")
+    # as warnings but still exits 0, so they need catching here.
+    extra="$(printf '%s\n' "$out" | grep -E '^Warning:' || true)"
+    if [ -n "$extra" ]; then
+      flag "Core files match, but there are extra files in core directories. Often a dropped shell; a custom script at the site root is the usual benign cause:"
+      printf '%s\n' "$extra" | block 80
+    else
+      ok "Core files match wordpress.org checksums and no extra files are present."
+    fi
   fi
   echo
 }
@@ -117,16 +129,26 @@ check_core_files() {
 check_plugin_files() {
   echo "## Plugin integrity (wordpress.org plugins only)"
   echo
-  local tmp_err out rows skipped
+  local tmp_err out rc rows skipped summary verified total
   tmp_err="$(mktemp)"
-  out="$("${WPLOUD[@]}" plugin verify-checksums --all --format=csv 2>"$tmp_err")"
-  # Keep only CSV data rows (plugin_name,file,message); drop the header and
-  # any Success:/Warning: lines WP-CLI prints to stdout.
-  out="$(printf '%s\n' "$out" | grep -E '^[^,]+,[^,]+,' | grep -v '^plugin_name,' || true)"
-  rows="$(printf '%s\n' "$out" | grep -c . || true)"
+  # JSON rather than CSV so a file name containing a newline can't split a
+  # record across lines and escape the count.
+  out="$("${WPLOUD[@]}" plugin verify-checksums --all --format=json 2>"$tmp_err")"; rc=$?
+  rows="$(printf '%s' "$out" | grep -o '"plugin_name"' | grep -c . || true)"
+  summary="$(cat "$tmp_err"; printf '%s\n' "$out")"
+  verified="$(printf '%s\n' "$summary" | grep -oE 'Verified [0-9]+ of [0-9]+' | head -n1 | awk '{print $2}')"
+  total="$(printf '%s\n' "$summary" | grep -oE 'Verified [0-9]+ of [0-9]+' | head -n1 | awk '{print $4}')"
   if [ "${rows:-0}" -gt 0 ]; then
     flag "$rows plugin file(s) don't match wordpress.org:"
-    printf 'plugin_name,file,message\n%s\n' "$out" | block 80
+    # One JSON record per line for readability.
+    printf '%s\n' "$out" | sed 's/},{/}\n{/g; s/^\[//; s/\]$//' | block 80
+  elif [ $rc -ne 0 ]; then
+    review "SKIPPED: plugin verify-checksums failed, so plugin integrity was not checked:"
+    grep -E '^(Error|Warning):' "$tmp_err" | block 20
+  elif [ -n "$total" ] && [ "$total" -gt 0 ] && [ "${verified:-0}" -eq 0 ]; then
+    review "SKIPPED: 0 of $total plugins could be verified. Usually the host can't reach wordpress.org; run the check from somewhere that can."
+  elif [ -n "$verified" ]; then
+    ok "$verified of $total plugins verified against wordpress.org checksums."
   else
     ok "All verifiable plugins match wordpress.org checksums."
   fi
@@ -247,7 +269,7 @@ check_users() {
 check_database() {
   echo "## Database"
   echo
-  local siteurl home prefix opts posts
+  local siteurl home prefix opts posts rc tmp_err
   siteurl="$("${WPCMD[@]}" option get siteurl 2>/dev/null)"
   home="$("${WPCMD[@]}" option get home 2>/dev/null)"
   note "siteurl: \`$siteurl\` · home: \`$home\` (should both be the client's own domain)"
@@ -256,10 +278,15 @@ check_database() {
   if [ -z "$prefix" ]; then
     review "SKIPPED: couldn't read the table prefix, so options and posts were not scanned."
   else
+    # A failed query must not read as a clean one, so capture rc and stderr.
+    tmp_err="$(mktemp)"
     opts="$("${WPCMD[@]}" db query \
       "SELECT option_name, autoload, LENGTH(option_value) AS bytes FROM ${prefix}options WHERE option_value REGEXP 'eval[(]|base64_decode[(]|gzinflate[(]|String[.]fromCharCode|<script[^>]+src=' ORDER BY bytes DESC LIMIT 50" \
-      --skip-column-names 2>/dev/null)"
-    if [ -n "$opts" ]; then
+      --skip-column-names 2>"$tmp_err")"; rc=$?
+    if [ $rc -ne 0 ]; then
+      review "SKIPPED: the options scan failed (large sites can hit MySQL's regex limits), so options were not checked:"
+      block 10 <"$tmp_err"
+    elif [ -n "$opts" ]; then
       review "Options containing script tags or obfuscation functions (analytics/header-script plugins are legit hits):"
       printf 'option_name\tautoload\tbytes\n%s\n' "$opts" | block 50
     else
@@ -267,13 +294,17 @@ check_database() {
     fi
     posts="$("${WPCMD[@]}" db query \
       "SELECT ID, post_type, post_status, post_modified FROM ${prefix}posts WHERE post_content REGEXP 'eval[(]|base64_decode[(]|String[.]fromCharCode|<script[^>]+src=' AND post_type NOT IN ('revision') ORDER BY post_modified DESC LIMIT 50" \
-      --skip-column-names 2>/dev/null)"
-    if [ -n "$posts" ]; then
+      --skip-column-names 2>"$tmp_err")"; rc=$?
+    if [ $rc -ne 0 ]; then
+      review "SKIPPED: the posts scan failed (large sites can hit MySQL's regex limits), so post content was not checked:"
+      block 10 <"$tmp_err"
+    elif [ -n "$posts" ]; then
       review "Posts/pages with external scripts or obfuscation (embeds can be legit):"
       printf 'ID\tpost_type\tpost_status\tpost_modified\n%s\n' "$posts" | block 50
     else
       ok "No suspicious scripts in post content."
     fi
+    rm -f "$tmp_err"
   fi
   echo
   echo "## Scheduled events"
