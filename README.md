@@ -49,22 +49,61 @@ host beyond the above.
 
 ## Usage
 
+### On the server itself
+
 ```bash
+curl -O https://raw.githubusercontent.com/brentmartinmiller/php2shell-check/main/php2shell-check.sh
 chmod +x php2shell-check.sh
 
-# One local site
+# One site
 ./php2shell-check.sh /var/www/example.com
+less php2shell-reports/*.md
 
-# One remote site
-./php2shell-check.sh deploy@203.0.113.10:/var/www/html
+# Every site on the box
+printf '%s\n' /var/www/*/public_html > sites.txt
+./php2shell-check.sh sites.txt
+cat php2shell-reports/SUMMARY.md
+```
 
-# Many sites from a list
+Run it as the user that owns the site files where you can. It works as root
+(WP-CLI gets `--allow-root`), but the crontab and SSH-key checks then inspect
+root's instead of the web user's.
+
+### From your workstation, against many servers
+
+```bash
+git clone https://github.com/brentmartinmiller/php2shell-check.git
+cd php2shell-check
+cp sites.txt.example sites.txt   # edit: one site per line
 ./php2shell-check.sh sites.txt
 ```
 
+For each `user@host:path` entry the script SSHes in, runs itself there, and
+brings the report back to `php2shell-reports/` on your machine. Nothing is
+installed on the remote host. SSH runs with `BatchMode=yes`, so key-based
+access that works without a password prompt is required.
+
+### Shared hosting
+
+Most shared hosts (Hostinger, SiteGround, Bluehost and the like) offer SSH but
+often don't have `wp` on the path. Check with `which wp`. If it's missing,
+download WP-CLI once into your home directory and point the script at it:
+
+```bash
+curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.11.0/phar/wp-cli.phar
+WP="php $HOME/wp-cli.phar" ./php2shell-check.sh domains/example.com/public_html
+```
+
+Without WP-CLI the file-system checks still run and the report notes what was
+skipped. Either way, ask the host directly when they rolled out the patched
+PHP, since that's the one thing an account-level check can't see.
+
+### Site list format
+
 `sites.txt` has one site per line, either a local path or `user@host:path`.
 Relative remote paths are relative to the SSH user's home directory. Lines
-starting with `#` are ignored. See `sites.txt.example`.
+starting with `#` are ignored. See `sites.txt.example`. The file is in
+`.gitignore` so client hostnames don't end up in a commit.
 
 Non-standard SSH ports, keys and jump hosts belong in `~/.ssh/config`:
 
