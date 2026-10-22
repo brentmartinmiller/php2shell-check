@@ -88,7 +88,12 @@ check_php() {
   elif ver_ge "$mm" "8.6"; then
     ok "CLI PHP $v is newer than the fixed branches."
   else
-    flag "CLI PHP $v is on an end-of-life branch with no official fix. Move to 8.2+ or a vendor-patched build."
+    case "$mm" in
+      7.4|8.0|8.1)
+        flag "CLI PHP $v is on an end-of-life branch. php.net shipped no release, but security-team backports exist via deb.sury.org, Remi and enterprise distros. Check the package changelog for the CVE IDs, and plan the move to 8.2+." ;;
+      *)
+        flag "CLI PHP $v is on an end-of-life branch with no fix at all. Move to 8.2+." ;;
+    esac
   fi
   note "This is the command-line PHP. The web server (PHP-FPM / mod_php) can run a different version. Confirm with phpinfo() or the hosting panel."
   note "Distro packages (Ubuntu/Debian/RHEL) may backport the fix without changing the version number. Check the package changelog for CVE-2026-109618/109619."
@@ -99,7 +104,7 @@ check_core_files() {
   echo "## WordPress core integrity"
   echo
   local out rc
-  out="$("${WPCMD[@]}" core verify-checksums 2>&1)"; rc=$?
+  out="$("${WPLOUD[@]}" core verify-checksums 2>&1)"; rc=$?
   if [ $rc -eq 0 ]; then
     ok "Core files match wordpress.org checksums."
   else
@@ -114,15 +119,19 @@ check_plugin_files() {
   echo
   local tmp_err out rows skipped
   tmp_err="$(mktemp)"
-  out="$("${WPCMD[@]}" plugin verify-checksums --all --format=csv 2>"$tmp_err")"
-  rows="$(printf '%s\n' "$out" | grep -v '^plugin_name,' | grep -c . || true)"
+  out="$("${WPLOUD[@]}" plugin verify-checksums --all --format=csv 2>"$tmp_err")"
+  # Keep only CSV data rows (plugin_name,file,message); drop the header and
+  # any Success:/Warning: lines WP-CLI prints to stdout.
+  out="$(printf '%s\n' "$out" | grep -E '^[^,]+,[^,]+,' | grep -v '^plugin_name,' || true)"
+  rows="$(printf '%s\n' "$out" | grep -c . || true)"
   if [ "${rows:-0}" -gt 0 ]; then
     flag "$rows plugin file(s) don't match wordpress.org:"
-    printf '%s\n' "$out" | block 80
+    printf 'plugin_name,file,message\n%s\n' "$out" | block 80
   else
     ok "All verifiable plugins match wordpress.org checksums."
   fi
-  skipped="$(grep -oE "checksums for the '[^']+'|plugin '[^']+'" "$tmp_err" | sed -E "s/.*'([^']+)'.*/\1/" | sort -u | tr '\n' ' ')"
+  # WP-CLI 2.12 says "...of plugin NAME, skipping."; older versions quote the name.
+  skipped="$(grep -oE "of plugin [^ ,]+|plugin '[^']+'" "$tmp_err" | sed -E "s/^of plugin //; s/^plugin '//; s/'\$//" | sort -u | tr '\n' ' ')"
   if [ -n "$skipped" ]; then
     note "Not verifiable (premium/custom). Compare against a fresh download or your repo: $skipped"
   fi
@@ -242,29 +251,29 @@ check_database() {
   siteurl="$("${WPCMD[@]}" option get siteurl 2>/dev/null)"
   home="$("${WPCMD[@]}" option get home 2>/dev/null)"
   note "siteurl: \`$siteurl\` · home: \`$home\` (should both be the client's own domain)"
-  prefix="$("${WPCMD[@]}" db prefix 2>/dev/null)"
+  # 'wp db prefix' prints nothing under --quiet; 'config get' does.
+  prefix="$("${WPCMD[@]}" config get table_prefix 2>/dev/null)"
   if [ -z "$prefix" ]; then
-    note "Couldn't read the table prefix; skipping option/post scans."
-    echo
-    return
-  fi
-  opts="$("${WPCMD[@]}" db query \
-    "SELECT option_name, autoload, LENGTH(option_value) AS bytes FROM ${prefix}options WHERE option_value REGEXP 'eval[(]|base64_decode[(]|gzinflate[(]|String[.]fromCharCode|<script[^>]+src=' ORDER BY bytes DESC LIMIT 50" \
-    --skip-column-names 2>/dev/null)"
-  if [ -n "$opts" ]; then
-    review "Options containing script tags or obfuscation functions (analytics/header-script plugins are legit hits):"
-    printf 'option_name\tautoload\tbytes\n%s\n' "$opts" | block 50
+    review "SKIPPED: couldn't read the table prefix, so options and posts were not scanned."
   else
-    ok "No suspicious content in options."
-  fi
-  posts="$("${WPCMD[@]}" db query \
-    "SELECT ID, post_type, post_status, post_modified FROM ${prefix}posts WHERE post_content REGEXP 'eval[(]|base64_decode[(]|String[.]fromCharCode|<script[^>]+src=' AND post_type NOT IN ('revision') ORDER BY post_modified DESC LIMIT 50" \
-    --skip-column-names 2>/dev/null)"
-  if [ -n "$posts" ]; then
-    review "Posts/pages with external scripts or obfuscation (embeds can be legit):"
-    printf 'ID\tpost_type\tpost_status\tpost_modified\n%s\n' "$posts" | block 50
-  else
-    ok "No suspicious scripts in post content."
+    opts="$("${WPCMD[@]}" db query \
+      "SELECT option_name, autoload, LENGTH(option_value) AS bytes FROM ${prefix}options WHERE option_value REGEXP 'eval[(]|base64_decode[(]|gzinflate[(]|String[.]fromCharCode|<script[^>]+src=' ORDER BY bytes DESC LIMIT 50" \
+      --skip-column-names 2>/dev/null)"
+    if [ -n "$opts" ]; then
+      review "Options containing script tags or obfuscation functions (analytics/header-script plugins are legit hits):"
+      printf 'option_name\tautoload\tbytes\n%s\n' "$opts" | block 50
+    else
+      ok "No suspicious content in options."
+    fi
+    posts="$("${WPCMD[@]}" db query \
+      "SELECT ID, post_type, post_status, post_modified FROM ${prefix}posts WHERE post_content REGEXP 'eval[(]|base64_decode[(]|String[.]fromCharCode|<script[^>]+src=' AND post_type NOT IN ('revision') ORDER BY post_modified DESC LIMIT 50" \
+      --skip-column-names 2>/dev/null)"
+    if [ -n "$posts" ]; then
+      review "Posts/pages with external scripts or obfuscation (embeds can be legit):"
+      printf 'ID\tpost_type\tpost_status\tpost_modified\n%s\n' "$posts" | block 50
+    else
+      ok "No suspicious scripts in post content."
+    fi
   fi
   echo
   echo "## Scheduled events"
@@ -300,8 +309,12 @@ run_single() {
   REVIEWS=0
   WPCMD=()
   read -r -a WPCMD <<<"$WP"
-  WPCMD+=(--path="$p" --skip-plugins --skip-themes --quiet)
+  WPCMD+=(--path="$p" --skip-plugins --skip-themes)
   [ "$(id -u)" = "0" ] && WPCMD+=(--allow-root)
+  # verify-checksums reports mismatches and unverifiable plugins as warnings,
+  # which --quiet hides. Keep an un-quieted copy for those two commands.
+  WPLOUD=("${WPCMD[@]}")
+  WPCMD+=(--quiet)
 
   echo "# PHP2Shell check: $(hostname):$p"
   echo
@@ -331,6 +344,7 @@ run_single() {
     note "WP-CLI not available or can't load the site. Skipping checksum, user and database checks. Set WP= to point at wp-cli."
     echo
     WPCMD=()
+    WPLOUD=()
   fi
 
   check_uploads_php "$p"
@@ -378,9 +392,9 @@ check_target() {
     run_single "$target" >"$report" 2>&1
   fi
   local php findings reviews
-  php="$(grep -oE '<!-- php: [^ ]+' "$report" | head -n1 | awk '{print $3}')"
-  findings="$(grep -oE 'findings: [0-9]+' "$report" | awk '{print $2}')"
-  reviews="$(grep -oE 'reviews: [0-9]+' "$report" | awk '{print $2}')"
+  php="$(grep --color=never -oE '<!-- php: [^ ]+' "$report" | head -n1 | awk '{print $3}')"
+  findings="$(grep --color=never -oE 'findings: [0-9]+' "$report" | awk '{print $2}')"
+  reviews="$(grep --color=never -oE 'reviews: [0-9]+' "$report" | awk '{print $2}')"
   printf '| %s | %s | %s | %s | [%s](%s) |\n' "$target" "${php:-?}" "${findings:-ERROR}" "${reviews:-?}" \
     "$(basename "$report")" "$(basename "$report")" >>"$OUT/SUMMARY.md"
 }

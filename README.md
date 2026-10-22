@@ -4,12 +4,14 @@ A read-only triage script for WordPress sites after **PHP2Shell**
 (CVE-2026-109618 and CVE-2026-109619), the pair of critical remote code
 execution bugs in the PHP engine disclosed on October 21, 2026.
 
-Patching PHP closes the door, but exploitation attempts were observed as
-early as **October 17**, before the public disclosure. Any site that was
-reachable on an unpatched PHP during that window may already have a backdoor,
-and updating PHP won't remove it. This script checks one or many WordPress
-sites for the things an attacker with code execution typically leaves behind,
-and writes a Markdown report for each.
+Patching PHP closes the door, but Amazon's honeypots logged an exploitation
+attempt on **October 17**, four days before the public disclosure, while the
+bugs were still under embargo. That is the earliest activity anyone has
+published, not the day attacks began, so treat it as a floor. Any site that
+was reachable on an unpatched PHP during that window may already have a
+backdoor, and updating PHP won't remove it. This script checks one or many
+WordPress sites for the things an attacker with code execution typically
+leaves behind, and writes a Markdown report for each.
 
 It **never modifies or deletes anything**. It lists, verifies and reports.
 What to do with the findings is up to you.
@@ -18,7 +20,7 @@ What to do with the findings is up to you.
 
 | Area | Check |
 |---|---|
-| PHP | Installed CLI version vs. the fixed releases (8.2.35, 8.3.36, 8.4.27, 8.5.12). Flags end-of-life branches with no official fix. |
+| PHP | Installed CLI version vs. the fixed releases (8.2.35, 8.3.36, 8.4.27, 8.5.12). Flags end-of-life branches, which got no release from php.net; see [Older PHP branches](#older-php-branches). |
 | Core integrity | `wp core verify-checksums` against wordpress.org |
 | Plugin integrity | `wp plugin verify-checksums --all`, and lists premium/custom plugins it can't verify |
 | Uploads | Any PHP-executable file under `wp-content/uploads` (ignores "Silence is golden" stubs) |
@@ -38,7 +40,7 @@ theme can't execute while the check runs.
 
 On each machine being checked:
 
-- `bash` 4+, GNU `find` and `grep` (standard on Linux hosts)
+- `bash` 3.2+, `find`, `grep` and `sort -V` (standard on Linux hosts; also works from a stock macOS workstation)
 - [WP-CLI](https://wp-cli.org/) for the checksum, user and database checks.
   Without it the file-system checks still run and the report says what was skipped.
 - `php` on the path, for the version check
@@ -90,7 +92,7 @@ often don't have `wp` on the path. Check with `which wp`. If it's missing,
 download WP-CLI once into your home directory and point the script at it:
 
 ```bash
-curl -O https://raw.githubusercontent.com/wp-cli/wp-cli/v2.11.0/phar/wp-cli.phar
+curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 WP="php $HOME/wp-cli.phar" ./php2shell-check.sh domains/example.com/public_html
 ```
 
@@ -123,7 +125,7 @@ Set these as environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SINCE` | `2026-10-17` | Start of the window for "recently modified" and "recently registered" checks |
+| `SINCE` | `2026-10-17` | Start of the window for "recently modified" and "recently registered" checks. This is the first confirmed exploitation attempt, not the first attack; set it earlier for sites that matter |
 | `WP` | `wp` | WP-CLI command on the target, e.g. `WP="php $HOME/wp-cli.phar"` for shared hosts |
 | `OUT` | `./php2shell-reports` | Where reports are written |
 
@@ -158,7 +160,9 @@ what tell you that.
 
 **Checksums beat timestamps.** Attackers can set a file's modification time
 to anything. A clean "recently modified" list is reassuring; a clean
-`verify-checksums` result is evidence.
+`verify-checksums` result is evidence. This matters more than usual here:
+whoever was exploiting this on October 17 had four quiet days before anyone
+was looking, which is plenty of time to backdate a file and trim a log.
 
 **Some hits are normal.**
 
@@ -172,6 +176,31 @@ or mod_php can be running a different version. Confirm with `phpinfo()` or
 your hosting panel. Distro packages (Debian, Ubuntu, RHEL) may also backport
 the fix without changing the version number; check the package changelog
 for the CVE IDs.
+
+### Older PHP branches
+
+php.net shipped fixed releases only for the supported branches, 8.2 through
+8.5. The script flags anything older as a likely problem because there is no
+version number it can compare against, but the real situation varies:
+
+- **7.4, 8.0 and 8.1** are end-of-life, but the PHP security team published
+  limited source backports of the fix, and the common third-party package
+  repositories picked them up: deb.sury.org for Debian and Ubuntu, Remi's
+  repository for RHEL, Fedora and derivatives, and the AlmaLinux and other
+  enterprise-distro updates. A host running one of these branches may already
+  be patched with the version number unchanged. Verify through the package
+  changelog rather than `php -v`, for example on Debian or Ubuntu:
+
+  ```bash
+  zgrep CVE-2026-109618 /usr/share/doc/php8.1-common/changelog.Debian.gz
+  ```
+
+  Treat an unpatched 7.4 to 8.1 host as vulnerable until that check passes,
+  and plan the move to 8.2 or later regardless; 8.2 itself reaches end of
+  life on December 31, 2026.
+- **7.3 and older, and all of PHP 5**, received nothing. The bugs reach back
+  to PHP 5.4, so any site still on these branches should be assumed exposed
+  from October 17 onward and moved to a supported PHP as part of the cleanup.
 
 ## If you find something
 
@@ -196,8 +225,11 @@ have your database credentials.
 
 - It looks for common indicators, not every possible backdoor. A clean
   report lowers the odds of compromise; it doesn't prove it.
-- It doesn't parse web server logs. Pull those separately and look for
-  unusual POST traffic from the 17th onward.
+- It doesn't parse web server logs. Pull those separately, and do it soon:
+  if the host rotates logs weekly, the pre-disclosure window is about to age
+  out. The one network indicator published so far is a multipart POST whose
+  body contains `PHP_SESSION_UPLOAD_PROGRESS`. Look from the 17th onward at
+  minimum, and further back if the logs allow it.
 - Shared hosting often has no SSH or WP-CLI. For those sites, use the
   host's file manager and malware scanner, and ask the host when they
   patched PHP.
@@ -212,8 +244,14 @@ applications (Drupal, Magento, Laravel). Keep the script read-only.
 
 ## References
 
-- [PHP security advisory](https://www.php.net/) and the GitHub advisories
-  GHSA-w8hw-w9fx-j79w (CVE-2026-109618) and GHSA-6wmf-4rv5-p3rp (CVE-2026-109619)
+- [PHP October 2026 security releases](https://www.php.net/archive/2026.php)
+  and the PHP advisories
+  [GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)
+  (CVE-2026-109618, RCE via OOM corruption) and
+  [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)
+  (CVE-2026-109619, RCE via stale global state)
+- [Amazon Threat Intelligence: PHP2Shell exploitation prior to public disclosure](https://aws.amazon.com/blogs/security/amazon-threat-intelligence-identifies-php2shell-exploitation-prior-to-public-disclosure-in-madpot/),
+  the source for the October 17 date and the `PHP_SESSION_UPLOAD_PROGRESS` indicator
 - [Wiz Research: PHP2Shell](https://www.wiz.io/blog/php2shell-php-rce)
 - [Calif: php2shell](https://calif.io/php2shell/)
 - [Sansec: PHP2Shell](https://sansec.io/research/php2shell)
