@@ -160,8 +160,10 @@ check_recent_files() {
   echo "## PHP and config files modified since $SINCE"
   echo
   local out count
+  # date -r FILE works on both GNU and BSD/macOS; find -printf is GNU-only.
   out="$(find "$1" -type f \( -name '*.php' -o -name '.htaccess' -o -name '.user.ini' -o -name 'php.ini' -o -name '*.ico' \) \
-          -newermt "$SINCE" -not -path '*/cache/*' -not -path '*/node_modules/*' -printf '%TY-%Tm-%Td %TH:%TM  %p\n' 2>/dev/null | sort -r)"
+          -newermt "$SINCE" -not -path '*/cache/*' -not -path '*/node_modules/*' \
+          -exec sh -c 'for f; do printf "%s  %s\n" "$(date -r "$f" "+%Y-%m-%d %H:%M")" "$f"; done' _ {} + 2>/dev/null | sort -r)"
   count="$(printf '%s\n' "$out" | grep -c . || true)"
   if [ "${count:-0}" -gt 0 ]; then
     review "$count file(s) changed since $SINCE. Expected if you updated plugins or core since then; anything else needs a look:"
